@@ -305,8 +305,14 @@ async def li_callback(request: web.Request) -> web.Response:
 
     if error or not code:
         logger.warning(f"[li_callback] Error from LinkedIn: {error or 'no code'}")
+        msg = error or "No authorization code received."
+        if error == "unauthorized_scope_error":
+            msg = (
+                "LinkedIn rejected requested scopes. Enable required app products/permissions "
+                "in LinkedIn Developer Portal and verify LINKEDIN_SCOPES env value."
+            )
         return web.Response(
-            text=_error_html(error or "No authorization code received."),
+            text=_error_html(msg),
             content_type="text/html",
         )
 
