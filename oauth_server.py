@@ -37,6 +37,7 @@ LINKEDIN_REDIRECT_URI   = os.environ["LINKEDIN_REDIRECT_URI"]
 
 CHAT_APP_BASE_URL       = os.environ.get("CHAT_APP_BASE_URL", "https://asi1.ai")
 SHARED_SECRET           = os.environ["SHARED_SECRET"]   # random secret, same value in agent env
+AUTO_REDIRECT_SUCCESS   = os.environ.get("AUTO_REDIRECT_SUCCESS", "false").lower() == "true"
 
 # ── In-memory stores ──────────────────────────────────────────────────────────
 # state_param (str) → metadata
@@ -52,6 +53,10 @@ _token_store: dict[str, dict] = {}
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _success_html(platform: str, chat_url: str) -> str:
+    redirect_script = (
+        f'<script>setTimeout(function(){{ window.location.replace("{chat_url}"); }}, 1200);</script>'
+        if AUTO_REDIRECT_SUCCESS else ""
+    )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -81,10 +86,10 @@ p      {{ color:#555; line-height:1.6; font-size:15px; }}
   <div class="icon">✅</div>
   <h1>{platform} Connected!</h1>
   <p>Authorization complete.</p>
-  <div class="tip">Returning to your chat session automatically. If it does not redirect, use the button below.</div>
+  <div class="tip">Return to your chat and continue. You can click below if needed.</div>
   <a class="link" href="{chat_url}">Return to chat →</a>
 </div>
-<script>setTimeout(function(){{ window.location.replace("{chat_url}"); }}, 1200);</script>
+{redirect_script}
 </body>
 </html>"""
 
@@ -184,7 +189,7 @@ async def register_state(request: web.Request) -> web.Response:
         return web.json_response({"error": "missing state or sender"}, status=400)
 
     if not return_url:
-        return_url = f"{CHAT_APP_BASE_URL}?chat_id={sender}"
+        return_url = CHAT_APP_BASE_URL
 
     _state_map[state] = {
         "sender": sender,
@@ -283,7 +288,7 @@ async def yt_callback(request: web.Request) -> web.Response:
     logger.info(f"[yt_callback] Token stored for sender={sender[:20]}…")
 
     return web.Response(
-        text=_success_html("YouTube", meta.get("return_url", f"{CHAT_APP_BASE_URL}?chat_id={sender}")),
+        text=_success_html("YouTube", meta.get("return_url", CHAT_APP_BASE_URL)),
         content_type="text/html",
     )
 
@@ -346,7 +351,7 @@ async def li_callback(request: web.Request) -> web.Response:
     logger.info(f"[li_callback] Token stored for sender={sender[:20]}…")
 
     return web.Response(
-        text=_success_html("LinkedIn", meta.get("return_url", f"{CHAT_APP_BASE_URL}?chat_id={sender}")),
+        text=_success_html("LinkedIn", meta.get("return_url", CHAT_APP_BASE_URL)),
         content_type="text/html",
     )
 
