@@ -39,8 +39,9 @@ CHAT_APP_BASE_URL       = os.environ.get("CHAT_APP_BASE_URL", "https://asi1.ai")
 SHARED_SECRET           = os.environ["SHARED_SECRET"]   # random secret, same value in agent env
 
 # ── In-memory stores ──────────────────────────────────────────────────────────
-# state_param (str) → sender_address (str)
-_state_map:  dict[str, str]  = {}
+# state_param (str) → metadata
+_state_map:  dict[str, dict]  = {}
+_used_states: set[str] = set()
 
 # sender_address (str) → {"yt": token, "yt_refresh": token, "li": token}
 _token_store: dict[str, dict] = {}
@@ -80,9 +81,10 @@ p      {{ color:#555; line-height:1.6; font-size:15px; }}
   <div class="icon">✅</div>
   <h1>{platform} Connected!</h1>
   <p>Authorization complete.</p>
-  <div class="tip">Return to your existing chat tab to continue the same session. Use the button below only if needed.</div>
+  <div class="tip">Returning to your chat session automatically. If it does not redirect, use the button below.</div>
   <a class="link" href="{chat_url}">Return to chat →</a>
 </div>
+<script>setTimeout(function(){{ window.location.replace("{chat_url}"); }}, 1200);</script>
 </body>
 </html>"""
 
@@ -173,13 +175,22 @@ async def register_state(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "invalid JSON"}, status=400)
 
-    state  = body.get("state", "").strip()
-    sender = body.get("sender", "").strip()
+    state      = body.get("state", "").strip()
+    sender     = body.get("sender", "").strip()
+    provider   = body.get("provider", "").strip()
+    return_url = body.get("return_url", "").strip()
 
     if not state or not sender:
         return web.json_response({"error": "missing state or sender"}, status=400)
 
-    _state_map[state] = sender
+    if not return_url:
+        return_url = f"{CHAT_APP_BASE_URL}?chat_id={sender}"
+
+    _state_map[state] = {
+        "sender": sender,
+        "provider": provider,
+        "return_url": return_url,
+    }
     logger.info(f"[register] state={state[:12]}… → sender={sender[:20]}…")
     return web.json_response({"ok": True})
 
@@ -229,7 +240,15 @@ async def yt_callback(request: web.Request) -> web.Response:
             content_type="text/html",
         )
 
-    sender = _state_map.pop(state, None) or _sender_from_state_fallback(state)
+    if state in _used_states:
+        cached = _state_map.get(state, {})
+        return web.Response(
+            text=_success_html("YouTube", cached.get("return_url", CHAT_APP_BASE_URL)),
+            content_type="text/html",
+        )
+
+    meta = _state_map.get(state, {}) or {}
+    sender = (meta.get("sender", "") if isinstance(meta, dict) else "") or _sender_from_state_fallback(state)
     if not sender:
         logger.warning(f"[yt_callback] Unknown state: {state[:12]}…")
         return web.Response(
@@ -260,10 +279,11 @@ async def yt_callback(request: web.Request) -> web.Response:
     _token_store.setdefault(sender, {})
     _token_store[sender]["yt"]         = tokens.get("access_token", "")
     _token_store[sender]["yt_refresh"] = tokens.get("refresh_token", "")
+    _used_states.add(state)
     logger.info(f"[yt_callback] Token stored for sender={sender[:20]}…")
 
     return web.Response(
-        text=_success_html("YouTube", CHAT_APP_BASE_URL),
+        text=_success_html("YouTube", meta.get("return_url", f"{CHAT_APP_BASE_URL}?chat_id={sender}")),
         content_type="text/html",
     )
 
@@ -285,7 +305,15 @@ async def li_callback(request: web.Request) -> web.Response:
             content_type="text/html",
         )
 
-    sender = _state_map.pop(state, None) or _sender_from_state_fallback(state)
+    if state in _used_states:
+        cached = _state_map.get(state, {})
+        return web.Response(
+            text=_success_html("LinkedIn", cached.get("return_url", CHAT_APP_BASE_URL)),
+            content_type="text/html",
+        )
+
+    meta = _state_map.get(state, {}) or {}
+    sender = (meta.get("sender", "") if isinstance(meta, dict) else "") or _sender_from_state_fallback(state)
     if not sender:
         logger.warning(f"[li_callback] Unknown state: {state[:12]}…")
         return web.Response(
@@ -314,10 +342,11 @@ async def li_callback(request: web.Request) -> web.Response:
 
     _token_store.setdefault(sender, {})
     _token_store[sender]["li"] = tokens.get("access_token", "")
+    _used_states.add(state)
     logger.info(f"[li_callback] Token stored for sender={sender[:20]}…")
 
     return web.Response(
-        text=_success_html("LinkedIn", CHAT_APP_BASE_URL),
+        text=_success_html("LinkedIn", meta.get("return_url", f"{CHAT_APP_BASE_URL}?chat_id={sender}")),
         content_type="text/html",
     )
 
