@@ -76,11 +76,10 @@ p      {{ color:#555; line-height:1.6; font-size:15px; }}
 <div class="card">
   <div class="icon">✅</div>
   <h1>{platform} Connected!</h1>
-  <p>Authorization complete. Returning you to chat now…</p>
-  <div class="tip">This window will close automatically. If it doesn't, click below.</div>
+  <p>Authorization complete.</p>
+  <div class="tip">Go back to the same chat tab where you opened this link so the agent can continue your current session.</div>
   <a class="link" href="{chat_url}">Return to chat →</a>
 </div>
-<script>setTimeout(function(){{ window.location.href = "{chat_url}"; }}, 1200);</script>
 </body>
 </html>"""
 
