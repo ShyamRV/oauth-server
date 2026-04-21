@@ -214,8 +214,15 @@ async def get_token(request: web.Request) -> web.Response:
         logger.warning("[token] Unauthorized attempt")
         return web.json_response({"error": "unauthorized"}, status=401)
 
-    sender   = request.query.get("sender", "").strip()
-    provider = request.query.get("provider", "").strip()
+    sender = request.query.get("sender", "").strip()
+    provider_raw = request.query.get("provider", "").strip().lower()
+    provider_map = {
+        "yt": "yt",
+        "youtube": "yt",
+        "li": "li",
+        "linkedin": "li",
+    }
+    provider = provider_map.get(provider_raw, provider_raw)
 
     if not sender or provider not in ("yt", "li"):
         return web.json_response({"error": "missing or invalid sender/provider"}, status=400)
