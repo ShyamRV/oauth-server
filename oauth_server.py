@@ -14,6 +14,9 @@
 
 import os
 import logging
+import base64
+import hashlib
+import hmac
 from aiohttp import web
 import httpx
 
@@ -138,6 +141,27 @@ def _check_secret(request: web.Request) -> bool:
     return request.headers.get("X-Secret") == SHARED_SECRET
 
 
+def _sender_from_state_fallback(state: str) -> str:
+    """
+    Recover sender from signed state if in-memory state map misses
+    (e.g., callback after service restart).
+    Expected format: v1.<base64(sender|salt|nonce)>.<sig>
+    """
+    try:
+        if not state.startswith("v1."):
+            return ""
+        _, b64_payload, sig = state.split(".", 2)
+        padded = b64_payload + ("=" * (-len(b64_payload) % 4))
+        payload = base64.urlsafe_b64decode(padded.encode()).decode()
+        expected = hashlib.sha256(f"{payload}|{SHARED_SECRET}".encode()).hexdigest()[:24]
+        if not hmac.compare_digest(sig, expected):
+            return ""
+        sender = payload.split("|", 1)[0].strip()
+        return sender
+    except Exception:
+        return ""
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
@@ -216,7 +240,7 @@ async def yt_callback(request: web.Request) -> web.Response:
             content_type="text/html",
         )
 
-    sender = _state_map.pop(state, None)
+    sender = _state_map.pop(state, None) or _sender_from_state_fallback(state)
     if not sender:
         logger.warning(f"[yt_callback] Unknown state: {state[:12]}…")
         return web.Response(
@@ -272,7 +296,7 @@ async def li_callback(request: web.Request) -> web.Response:
             content_type="text/html",
         )
 
-    sender = _state_map.pop(state, None)
+    sender = _state_map.pop(state, None) or _sender_from_state_fallback(state)
     if not sender:
         logger.warning(f"[li_callback] Unknown state: {state[:12]}…")
         return web.Response(
