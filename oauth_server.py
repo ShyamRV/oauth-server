@@ -80,20 +80,9 @@ p      {{ color:#555; line-height:1.6; font-size:15px; }}
   <div class="icon">✅</div>
   <h1>{platform} Connected!</h1>
   <p>Authorization complete.</p>
-  <div class="tip">Returning to your previous chat session… If it does not switch automatically, use the button below.</div>
+  <div class="tip">Return to your existing chat tab to continue the same session. Use the button below only if needed.</div>
   <a class="link" href="{chat_url}">Return to chat →</a>
 </div>
-<script>
-setTimeout(function() {{
-  // Best effort: go back to the exact tab/session where auth link was opened.
-  if (window.history.length > 1) {{
-    window.history.back();
-    return;
-  }}
-  // Fallback for direct-opened callback pages.
-  window.location.href = "{chat_url}";
-}}, 900);
-</script>
 </body>
 </html>"""
 
