@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: social-army-oauth
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python oauth_server.py
+    envVars:
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: LINKEDIN_CLIENT_ID
+        sync: false
+      - key: LINKEDIN_CLIENT_SECRET
+        sync: false
+      - key: LINKEDIN_REDIRECT_URI
+        sync: false
+      - key: SHARED_SECRET
+        sync: false
+      - key: CHAT_APP_BASE_URL
+        sync: false
