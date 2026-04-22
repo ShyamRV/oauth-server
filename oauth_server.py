@@ -1,156 +1,149 @@
-"""
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  AI Social Media Army — OAuth Callback Server                               ║
-║  Deploy this to Render (free tier).                                         ║
-║                                                                              ║
-║  Routes:                                                                     ║
-║    POST /register              ← agent registers state_param → sender       ║
-║    GET  /token                 ← agent polls for stored token                ║
-║    GET  /callback/youtube      ← Google OAuth2 redirect                     ║
-║    GET  /callback/linkedin     ← LinkedIn OAuth2 redirect                   ║
-║    GET  /                      ← health check                               ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-"""
-
-import os
-import logging
 import base64
 import hashlib
-import hmac
-from aiohttp import web
+import os
+from typing import Dict
+
 import httpx
+from aiohttp import web
+from dotenv import load_dotenv
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [oauth-server] %(levelname)s — %(message)s",
-)
-logger = logging.getLogger("oauth-server")
+load_dotenv()
 
-# ── Config ────────────────────────────────────────────────────────────────────
-GOOGLE_CLIENT_ID        = os.environ["GOOGLE_CLIENT_ID"]
-GOOGLE_CLIENT_SECRET    = os.environ["GOOGLE_CLIENT_SECRET"]
-GOOGLE_REDIRECT_URI     = os.environ["GOOGLE_REDIRECT_URI"]
 
-LINKEDIN_CLIENT_ID      = os.environ["LINKEDIN_CLIENT_ID"]
-LINKEDIN_CLIENT_SECRET  = os.environ["LINKEDIN_CLIENT_SECRET"]
-LINKEDIN_REDIRECT_URI   = os.environ["LINKEDIN_REDIRECT_URI"]
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REDIRECT_URI = os.environ.get("GOOGLE_REDIRECT_URI", "")
 
-CHAT_APP_BASE_URL       = os.environ.get("CHAT_APP_BASE_URL", "https://asi1.ai")
-SHARED_SECRET           = os.environ["SHARED_SECRET"]   # random secret, same value in agent env
-AUTO_REDIRECT_SUCCESS   = os.environ.get("AUTO_REDIRECT_SUCCESS", "false").lower() == "true"
+LINKEDIN_CLIENT_ID = os.environ.get("LINKEDIN_CLIENT_ID", "")
+LINKEDIN_CLIENT_SECRET = os.environ.get("LINKEDIN_CLIENT_SECRET", "")
+LINKEDIN_REDIRECT_URI = os.environ.get("LINKEDIN_REDIRECT_URI", "")
 
-# ── In-memory stores ──────────────────────────────────────────────────────────
-# state_param (str) → metadata
-_state_map:  dict[str, dict]  = {}
+SHARED_SECRET = os.environ.get("SHARED_SECRET", "dev-secret")
+CHAT_APP_BASE_URL = os.environ.get("CHAT_APP_BASE_URL", "https://asi1.ai")
+AUTO_REDIRECT_SUCCESS = os.environ.get("AUTO_REDIRECT_SUCCESS", "false").lower() == "true"
+
+_state_map: Dict[str, Dict] = {}
 _used_states: set[str] = set()
+_token_store: Dict[str, Dict] = {}
 
-# sender_address (str) → {"yt": token, "yt_refresh": token, "li": token}
-_token_store: dict[str, dict] = {}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  HTML TEMPLATES
-# ══════════════════════════════════════════════════════════════════════════════
 
 def _success_html(platform: str, chat_url: str) -> str:
-    redirect_script = (
-        f'<script>setTimeout(function(){{ window.location.replace("{chat_url}"); }}, 1200);</script>'
-        if AUTO_REDIRECT_SUCCESS else ""
-    )
-    return f"""<!DOCTYPE html>
-<html lang="en">
+    redirect_block = ""
+    if AUTO_REDIRECT_SUCCESS:
+        redirect_block = f"""
+        <p>Redirecting back to chat...</p>
+        <script>
+        setTimeout(function() {{
+            window.location.href = "{chat_url}";
+        }}, 1500);
+        </script>
+        """
+    return f"""<!doctype html>
+<html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{platform} Connected — AI Social Media Army</title>
-<style>
-* {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{
-  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-  background:linear-gradient(135deg,#6366f1 0%,#4f46e5 100%);
-  min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px;
-}}
-.card {{
-  background:white; border-radius:16px; padding:40px; max-width:420px;
-  text-align:center; box-shadow:0 20px 60px rgba(0,0,0,.2);
-}}
-.icon  {{ font-size:64px; margin-bottom:16px; }}
-h1     {{ color:#4f46e5; font-size:24px; margin-bottom:12px; }}
-p      {{ color:#555; line-height:1.6; font-size:15px; }}
-.tip   {{ background:#f0f0ff; border-radius:8px; padding:16px; margin-top:24px; font-size:14px; color:#333; }}
-.link  {{ display:inline-block; margin-top:16px; color:#4f46e5; text-decoration:none; font-weight:600; }}
-</style>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>{platform} Connected</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #4f46e5, #6366f1);
+    }}
+    .card {{
+      background: white;
+      border-radius: 16px;
+      padding: 32px;
+      max-width: 460px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+      text-align: center;
+    }}
+    .icon {{
+      font-size: 52px;
+      margin-bottom: 10px;
+    }}
+    h1 {{ margin: 8px 0 12px; }}
+    a {{
+      display: inline-block;
+      margin-top: 8px;
+      text-decoration: none;
+      color: #4f46e5;
+      font-weight: bold;
+    }}
+  </style>
 </head>
 <body>
-<div class="card">
-  <div class="icon">✅</div>
-  <h1>{platform} Connected!</h1>
-  <p>Authorization complete.</p>
-  <div class="tip">Return to your chat and continue. You can click below if needed.</div>
-  <a class="link" href="{chat_url}">Return to chat →</a>
-</div>
-{redirect_script}
+  <div class="card">
+    <div class="icon">✅</div>
+    <h1>{platform} Connected!</h1>
+    <p>You can safely close this page.</p>
+    <a href="{chat_url}">Return to chat</a>
+    {redirect_block}
+  </div>
 </body>
 </html>"""
 
 
-def _error_html(error: str) -> str:
-    return f"""<!DOCTYPE html>
-<html lang="en">
+def _error_html(message: str) -> str:
+    return f"""<!doctype html>
+<html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Auth Error — AI Social Media Army</title>
-<style>
-* {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{
-  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-  background:linear-gradient(135deg,#ef4444 0%,#b91c1c 100%);
-  min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px;
-}}
-.card {{
-  background:white; border-radius:16px; padding:40px; max-width:420px;
-  text-align:center; box-shadow:0 20px 60px rgba(0,0,0,.2);
-}}
-.icon {{ font-size:64px; margin-bottom:16px; }}
-h1    {{ color:#ef4444; font-size:24px; margin-bottom:12px; }}
-p     {{ color:#555; line-height:1.6; font-size:15px; }}
-</style>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Authentication Error</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: Arial, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #dc2626, #ef4444);
+    }}
+    .card {{
+      background: white;
+      border-radius: 16px;
+      padding: 32px;
+      max-width: 520px;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.2);
+      text-align: center;
+    }}
+    .icon {{
+      font-size: 52px;
+      margin-bottom: 10px;
+    }}
+    h1 {{ margin: 8px 0 12px; }}
+    p {{ color: #333; white-space: pre-wrap; }}
+  </style>
 </head>
 <body>
-<div class="card">
-  <div class="icon">❌</div>
-  <h1>Authentication Error</h1>
-  <p>{error}</p>
-  <p style="margin-top:16px;font-size:13px;color:#999;">Close this window and try again from chat.</p>
-</div>
+  <div class="card">
+    <div class="icon">❌</div>
+    <h1>Authentication Error</h1>
+    <p>{message}</p>
+  </div>
 </body>
 </html>"""
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  AUTH MIDDLEWARE
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _check_secret(request: web.Request) -> bool:
-    """Verify the shared secret header on agent-to-server calls."""
-    return request.headers.get("X-Secret") == SHARED_SECRET
 
 
 def _sender_from_state_fallback(state: str) -> str:
-    """
-    Recover sender from signed state if in-memory state map misses
-    (e.g., callback after service restart).
-    Expected format: v1.<base64(sender|salt|nonce)>.<sig>
-    """
+    # This lets callback still recover sender after server restarts as long as
+    # the signed state format is intact.
     try:
-        if not state.startswith("v1."):
+        parts = state.split(".")
+        if len(parts) != 3 or parts[0] != "v1":
             return ""
-        _, b64_payload, sig = state.split(".", 2)
-        padded = b64_payload + ("=" * (-len(b64_payload) % 4))
-        payload = base64.urlsafe_b64decode(padded.encode()).decode()
+        b64_payload = parts[1]
+        sig = parts[2]
+        padding = "=" * (-len(b64_payload) % 4)
+        payload = base64.urlsafe_b64decode((b64_payload + padding).encode()).decode()
         expected = hashlib.sha256(f"{payload}|{SHARED_SECRET}".encode()).hexdigest()[:24]
-        if not hmac.compare_digest(sig, expected):
+        if expected != sig:
             return ""
         sender = payload.split("|", 1)[0].strip()
         return sender
@@ -158,248 +151,175 @@ def _sender_from_state_fallback(state: str) -> str:
         return ""
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  ROUTES
-# ══════════════════════════════════════════════════════════════════════════════
+def _require_secret(request: web.Request) -> bool:
+    return request.headers.get("X-Secret", "") == SHARED_SECRET
+
+
+def _provider_norm(provider: str) -> str:
+    p = (provider or "").strip().lower()
+    if p == "youtube":
+        return "yt"
+    if p == "linkedin":
+        return "li"
+    return p
+
+
+async def health(_request: web.Request) -> web.Response:
+    return web.Response(
+        text="AI Social Media Army OAuth Server — Running",
+        content_type="text/html",
+    )
+
 
 async def register_state(request: web.Request) -> web.Response:
-    """
-    Called by the agent BEFORE sending the OAuth link to the user.
-    Maps state_param → sender_address so the callback can identify the user.
-
-    POST /register
-    Headers: X-Secret: <SHARED_SECRET>
-    Body:    {"state": "<state_param>", "sender": "<sender_address>"}
-    """
-    if not _check_secret(request):
-        logger.warning("[register] Unauthorized attempt")
-        return web.json_response({"error": "unauthorized"}, status=401)
-
+    if not _require_secret(request):
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
     try:
         body = await request.json()
     except Exception:
-        return web.json_response({"error": "invalid JSON"}, status=400)
-
-    state      = body.get("state", "").strip()
-    sender     = body.get("sender", "").strip()
-    provider   = body.get("provider", "").strip()
-    return_url = body.get("return_url", "").strip()
-
-    if not state or not sender:
-        return web.json_response({"error": "missing state or sender"}, status=400)
-
-    if not return_url:
-        return_url = CHAT_APP_BASE_URL
-
-    _state_map[state] = {
-        "sender": sender,
-        "provider": provider,
-        "return_url": return_url,
-    }
-    logger.info(f"[register] state={state[:12]}… → sender={sender[:20]}…")
+        return web.json_response({"ok": False, "error": "invalid json"}, status=400)
+    state = (body.get("state") or "").strip()
+    sender = (body.get("sender") or "").strip()
+    provider = _provider_norm(body.get("provider", ""))
+    return_url = (body.get("return_url") or CHAT_APP_BASE_URL).strip()
+    if not state or not sender or provider not in {"yt", "li"}:
+        return web.json_response({"ok": False, "error": "bad payload"}, status=400)
+    _state_map[state] = {"sender": sender, "provider": provider, "return_url": return_url}
     return web.json_response({"ok": True})
 
 
-async def get_token(request: web.Request) -> web.Response:
-    """
-    Called by the agent after sending the OAuth link to check if the user
-    has completed the browser flow.
+async def token_lookup(request: web.Request) -> web.Response:
+    if not _require_secret(request):
+        return web.json_response({"access_token": "", "refresh_token": ""}, status=401)
+    sender = (request.query.get("sender") or "").strip()
+    provider = _provider_norm(request.query.get("provider", ""))
+    slot = _token_store.get(sender, {})
+    if provider == "yt":
+        return web.json_response(
+            {"access_token": slot.get("yt", ""), "refresh_token": slot.get("yt_refresh", "")}
+        )
+    if provider == "li":
+        return web.json_response(
+            {"access_token": slot.get("li", ""), "refresh_token": slot.get("li_refresh", "")}
+        )
+    return web.json_response({"access_token": "", "refresh_token": ""})
 
-    GET /token?sender=<address>&provider=yt|li
-    Headers: X-Secret: <SHARED_SECRET>
-    Returns: {"access_token": "...", "refresh_token": "..."}
-             access_token is "" if auth not yet complete.
-    """
-    if not _check_secret(request):
-        logger.warning("[token] Unauthorized attempt")
-        return web.json_response({"error": "unauthorized"}, status=401)
 
-    sender = request.query.get("sender", "").strip()
-    provider_raw = request.query.get("provider", "").strip().lower()
-    provider_map = {
-        "yt": "yt",
-        "youtube": "yt",
-        "li": "li",
-        "linkedin": "li",
+async def _exchange_google_code(code: str) -> Dict:
+    payload = {
+        "code": code,
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "grant_type": "authorization_code",
     }
-    provider = provider_map.get(provider_raw, provider_raw)
-
-    if not sender or provider not in ("yt", "li"):
-        return web.json_response({"error": "missing or invalid sender/provider"}, status=400)
-
-    data    = _token_store.get(sender, {})
-    token   = data.get(provider, "")
-    refresh = data.get(f"{provider}_refresh", "")
-
-    logger.info(f"[token] provider={provider} sender={sender[:20]}… found={'yes' if token else 'no'}")
-    return web.json_response({"access_token": token, "refresh_token": refresh})
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post("https://oauth2.googleapis.com/token", data=payload)
+    r.raise_for_status()
+    return r.json()
 
 
-async def yt_callback(request: web.Request) -> web.Response:
-    """
-    Google/YouTube OAuth2 redirect target.
-    GET /callback/youtube?code=...&state=...
-    """
-    q     = dict(request.query)
-    code  = q.get("code", "")
-    state = q.get("state", "")
-    error = q.get("error", "")
+async def _exchange_linkedin_code(code: str) -> Dict:
+    payload = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "client_id": LINKEDIN_CLIENT_ID,
+        "client_secret": LINKEDIN_CLIENT_SECRET,
+        "redirect_uri": LINKEDIN_REDIRECT_URI,
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post("https://www.linkedin.com/oauth/v2/accessToken", data=payload)
+    r.raise_for_status()
+    return r.json()
 
-    if error or not code:
-        logger.warning(f"[yt_callback] Error from Google: {error or 'no code'}")
+
+async def callback_youtube(request: web.Request) -> web.Response:
+    if request.query.get("error"):
         return web.Response(
-            text=_error_html(error or "No authorization code received."),
+            text=_error_html(f"Google error: {request.query.get('error')}"),
             content_type="text/html",
         )
+    code = (request.query.get("code") or "").strip()
+    state = (request.query.get("state") or "").strip()
+    if not code or not state:
+        return web.Response(text=_error_html("Missing code or state"), content_type="text/html")
+
+    meta = _state_map.get(state) or {}
+    sender = meta.get("sender") or _sender_from_state_fallback(state)
+    return_url = meta.get("return_url") or CHAT_APP_BASE_URL
 
     if state in _used_states:
-        cached = _state_map.get(state, {})
         return web.Response(
-            text=_success_html("YouTube", cached.get("return_url", CHAT_APP_BASE_URL)),
+            text=_success_html("YouTube", return_url),
             content_type="text/html",
         )
 
-    meta = _state_map.get(state, {}) or {}
-    sender = (meta.get("sender", "") if isinstance(meta, dict) else "") or _sender_from_state_fallback(state)
     if not sender:
-        logger.warning(f"[yt_callback] Unknown state: {state[:12]}…")
         return web.Response(
-            text=_error_html("Invalid state parameter. Please try again from chat."),
-            content_type="text/html",
-        )
-
-    # Exchange authorization code for access + refresh tokens
-    try:
-        async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.post(
-                "https://oauth2.googleapis.com/token",
-                data={
-                    "code":          code,
-                    "client_id":     GOOGLE_CLIENT_ID,
-                    "client_secret": GOOGLE_CLIENT_SECRET,
-                    "redirect_uri":  GOOGLE_REDIRECT_URI,
-                    "grant_type":    "authorization_code",
-                },
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"Google token exchange {r.status_code}: {r.text[:200]}")
-            tokens = r.json()
-    except Exception as e:
-        logger.error(f"[yt_callback] Token exchange failed: {e}")
-        return web.Response(text=_error_html(f"Token exchange failed: {e}"), content_type="text/html")
-
-    _token_store.setdefault(sender, {})
-    _token_store[sender]["yt"]         = tokens.get("access_token", "")
-    _token_store[sender]["yt_refresh"] = tokens.get("refresh_token", "")
-    _used_states.add(state)
-    logger.info(f"[yt_callback] Token stored for sender={sender[:20]}…")
-
-    return web.Response(
-        text=_success_html("YouTube", meta.get("return_url", CHAT_APP_BASE_URL)),
-        content_type="text/html",
-    )
-
-
-async def li_callback(request: web.Request) -> web.Response:
-    """
-    LinkedIn OAuth2 redirect target.
-    GET /callback/linkedin?code=...&state=...
-    """
-    q     = dict(request.query)
-    code  = q.get("code", "")
-    state = q.get("state", "")
-    error = q.get("error", "")
-
-    if error or not code:
-        logger.warning(f"[li_callback] Error from LinkedIn: {error or 'no code'}")
-        msg = error or "No authorization code received."
-        if error == "unauthorized_scope_error":
-            msg = (
-                "LinkedIn rejected requested scopes. Enable required app products/permissions "
-                "in LinkedIn Developer Portal and verify LINKEDIN_SCOPES env value."
-            )
-        return web.Response(
-            text=_error_html(msg),
-            content_type="text/html",
-        )
-
-    if state in _used_states:
-        cached = _state_map.get(state, {})
-        return web.Response(
-            text=_success_html("LinkedIn", cached.get("return_url", CHAT_APP_BASE_URL)),
-            content_type="text/html",
-        )
-
-    meta = _state_map.get(state, {}) or {}
-    sender = (meta.get("sender", "") if isinstance(meta, dict) else "") or _sender_from_state_fallback(state)
-    if not sender:
-        logger.warning(f"[li_callback] Unknown state: {state[:12]}…")
-        return web.Response(
-            text=_error_html("Invalid state parameter. Please try again from chat."),
+            text=_error_html("Unknown or expired state; please retry auth from chat."),
             content_type="text/html",
         )
 
     try:
-        async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.post(
-                "https://www.linkedin.com/oauth/v2/accessToken",
-                data={
-                    "grant_type":    "authorization_code",
-                    "code":          code,
-                    "redirect_uri":  LINKEDIN_REDIRECT_URI,
-                    "client_id":     LINKEDIN_CLIENT_ID,
-                    "client_secret": LINKEDIN_CLIENT_SECRET,
-                },
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"LinkedIn token exchange {r.status_code}: {r.text[:200]}")
-            tokens = r.json()
-    except Exception as e:
-        logger.error(f"[li_callback] Token exchange failed: {e}")
-        return web.Response(text=_error_html(f"Token exchange failed: {e}"), content_type="text/html")
-
-    _token_store.setdefault(sender, {})
-    _token_store[sender]["li"] = tokens.get("access_token", "")
-    _used_states.add(state)
-    logger.info(f"[li_callback] Token stored for sender={sender[:20]}…")
-
-    return web.Response(
-        text=_success_html("LinkedIn", meta.get("return_url", CHAT_APP_BASE_URL)),
-        content_type="text/html",
-    )
+        token_data = await _exchange_google_code(code)
+        bucket = _token_store.setdefault(sender, {})
+        bucket["yt"] = token_data.get("access_token", "")
+        bucket["yt_refresh"] = token_data.get("refresh_token", "")
+        _used_states.add(state)
+        return web.Response(text=_success_html("YouTube", return_url), content_type="text/html")
+    except Exception as exc:
+        return web.Response(text=_error_html(str(exc)), content_type="text/html")
 
 
-async def home(request: web.Request) -> web.Response:
-    """Health check."""
-    return web.Response(
-        text=(
-            "<html><body style='font-family:sans-serif;padding:40px'>"
-            "<h2>🎬 AI Social Media Army — OAuth Server</h2>"
-            "<p>✅ Running</p>"
-            "<ul>"
-            "<li>POST /register — agent registers OAuth state</li>"
-            "<li>GET  /token   — agent polls for stored token</li>"
-            "<li>GET  /callback/youtube  — Google redirect</li>"
-            "<li>GET  /callback/linkedin — LinkedIn redirect</li>"
-            "</ul>"
-            "</body></html>"
-        ),
-        content_type="text/html",
-    )
+async def callback_linkedin(request: web.Request) -> web.Response:
+    if request.query.get("error"):
+        return web.Response(
+            text=_error_html(f"LinkedIn error: {request.query.get('error')}"),
+            content_type="text/html",
+        )
+    code = (request.query.get("code") or "").strip()
+    state = (request.query.get("state") or "").strip()
+    if not code or not state:
+        return web.Response(text=_error_html("Missing code or state"), content_type="text/html")
+
+    meta = _state_map.get(state) or {}
+    sender = meta.get("sender") or _sender_from_state_fallback(state)
+    return_url = meta.get("return_url") or CHAT_APP_BASE_URL
+
+    if state in _used_states:
+        return web.Response(
+            text=_success_html("LinkedIn", return_url),
+            content_type="text/html",
+        )
+
+    if not sender:
+        return web.Response(
+            text=_error_html("Unknown or expired state; please retry auth from chat."),
+            content_type="text/html",
+        )
+
+    try:
+        token_data = await _exchange_linkedin_code(code)
+        bucket = _token_store.setdefault(sender, {})
+        bucket["li"] = token_data.get("access_token", "")
+        bucket["li_refresh"] = token_data.get("refresh_token", "")
+        _used_states.add(state)
+        return web.Response(text=_success_html("LinkedIn", return_url), content_type="text/html")
+    except Exception as exc:
+        return web.Response(text=_error_html(str(exc)), content_type="text/html")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  APP
-# ══════════════════════════════════════════════════════════════════════════════
+def _build_app() -> web.Application:
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_post("/register", register_state)
+    app.router.add_get("/token", token_lookup)
+    app.router.add_get("/callback/youtube", callback_youtube)
+    app.router.add_get("/callback/linkedin", callback_linkedin)
+    return app
 
-app = web.Application()
-app.router.add_post("/register",           register_state)
-app.router.add_get("/token",               get_token)
-app.router.add_get("/callback/youtube",    yt_callback)
-app.router.add_get("/callback/linkedin",   li_callback)
-app.router.add_get("/",                    home)
 
 if __name__ == "__main__":
+    app = _build_app()
     port = int(os.environ.get("PORT", 8001))
-    logger.info(f"OAuth server starting on port {port}")
     web.run_app(app, host="0.0.0.0", port=port)
